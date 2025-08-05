@@ -4,6 +4,7 @@ Plugin Name: CF7 Waitlist Switcher (CFDB7 Based)
 Description: Automatically switches a Contact Form 7 registration form to a waitlist form after a maximum number of submissions (tracked via CFDB7). Includes admin panel, reset button, and email alerts with CC support.
 Version: 1.1
 Author: Jackets Development
+Requires Plugins: contact-form-7
 */
 
 defined('ABSPATH') || exit;
