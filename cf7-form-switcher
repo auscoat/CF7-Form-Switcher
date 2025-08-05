@@ -1,133 +1,141 @@
-?php
+<?php
 /*
-Plugin Name: CF7 Waitlist Switcher (CFDB7 Based)
-Description: Automatically switches a Contact Form 7 registration form to a waitlist form after a maximum number of submissions (tracked via CFDB7). Includes admin panel, reset button, and email alerts with CC support.
-Version: 1.1
+Plugin Name: CF7 Forms Switcher
+Description: Automatically switches from a registration form to a waitlist form after reaching a submission limit. Requires Contact Form 7 and CFDB7.
+Version: 1.2
 Author: Jackets Development
 Requires Plugins: contact-form-7
 */
 
-defined('ABSPATH') || exit;
+include_once(ABSPATH . 'wp-admin/includes/plugin.php');
 
-// === GET SETTINGS ===
-function cf7ws_get_option($key, $default = '') {
-    return get_option('cf7ws_' . $key, $default);
-}
-
-// === COUNT SUBMISSIONS FROM CFDB7 ===
-function get_cf7_submission_count_cfdb7($form_id) {
-    global $wpdb;
-    return (int) $wpdb->get_var($wpdb->prepare(
-        "SELECT COUNT(*) FROM {$wpdb->prefix}db7_forms WHERE form_post_id = %d",
-        $form_id
-    ));
-}
-
-// === SHORTCODE TO DISPLAY CORRECT FORM ===
-add_shortcode('conditional_form', function() {
-    $reg_id = (int) cf7ws_get_option('reg_form_id', 0);
-    $wait_id = (int) cf7ws_get_option('wait_form_id', 0);
-    $limit = (int) cf7ws_get_option('max_subs', 200);
-
-    $count = get_cf7_submission_count_cfdb7($reg_id);
-    $form_id = ($count >= $limit) ? $wait_id : $reg_id;
-
-    return do_shortcode('[contact-form-7 id="' . esc_attr($form_id) . '"]');
-});
-
-// === BLOCK SUBMISSIONS IF LIMIT IS HIT ===
-add_action('wpcf7_before_send_mail', function($contact_form) {
-    $reg_id = (int) cf7ws_get_option('reg_form_id', 0);
-    $wait_id = (int) cf7ws_get_option('wait_form_id', 0);
-    $limit = (int) cf7ws_get_option('max_subs', 200);
-    $emails = cf7ws_get_option('alert_emails', get_bloginfo('admin_email'));
-    $email_list = array_map('trim', explode(',', $emails));
-
-    if ((int)$contact_form->id() === $reg_id) {
-        $count = get_cf7_submission_count_cfdb7($reg_id);
-
-        if ($count >= $limit) {
-            $submission = WPCF7_Submission::get_instance();
-            if ($submission) {
-                $submission->invalidate(null, "Registration is full. Please use the waitlist form.");
-            }
-        } elseif ($count + 1 === $limit) {
-            $to = $email_list;
-            $subject = "CF7 Registration Limit Reached";
-            $message = "The registration form has now reached the limit of $limit submissions.";
-            $headers = ['Content-Type: text/html; charset=UTF-8'];
-            if (count($to) > 1) {
-                $headers[] = 'Cc: ' . implode(',', array_slice($to, 1));
-            }
-            wp_mail($to[0], $subject, $message, $headers);
-        }
+// === Admin notice if Contact Form 7 is not active ===
+add_action('admin_init', function() {
+    if (!is_plugin_active('contact-form-7/wp-contact-form-7.php')) {
+        add_action('admin_notices', function () {
+            echo '<div class="notice notice-error"><p><strong>CF7 Forms Switcher:</strong> This plugin requires <a href="https://wordpress.org/plugins/contact-form-7/" target="_blank">Contact Form 7</a> to be installed and activated.</p></div>';
+        });
     }
 });
 
-// === ADMIN MENU PAGE ===
+// === Register settings ===
+add_action('admin_init', function() {
+    register_setting('cf7fs_settings', 'cf7fs_registration_form_id');
+    register_setting('cf7fs_settings', 'cf7fs_waitlist_form_id');
+    register_setting('cf7fs_settings', 'cf7fs_max_submissions');
+    register_setting('cf7fs_settings', 'cf7fs_alert_emails');
+});
+
+// === Admin settings menu ===
 add_action('admin_menu', function() {
-    add_options_page('CF7 Waitlist Switcher', 'CF7 Waitlist Switcher', 'manage_options', 'cf7-waitlist-switcher', 'cf7_waitlist_switcher_settings_page');
+    add_options_page('CF7 Forms Switcher', 'CF7 Forms Switcher', 'manage_options', 'cf7-forms-switcher', 'cf7fs_settings_page');
 });
 
-// === ADMIN SETTINGS PAGE ===
-function cf7_waitlist_switcher_settings_page() {
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_admin_referer('cf7ws_update_settings')) {
-        update_option('cf7ws_reg_form_id', sanitize_text_field($_POST['reg_form_id']));
-        update_option('cf7ws_wait_form_id', sanitize_text_field($_POST['wait_form_id']));
-        update_option('cf7ws_max_subs', sanitize_text_field($_POST['max_subs']));
-        update_option('cf7ws_alert_emails', sanitize_text_field($_POST['alert_emails']));
-        echo '<div class="updated"><p>Settings saved.</p></div>';
+// === Get list of CF7 forms ===
+function cf7fs_get_forms_list() {
+    $forms = get_posts([
+        'post_type' => 'wpcf7_contact_form',
+        'numberposts' => -1
+    ]);
+    $list = [];
+    foreach ($forms as $form) {
+        $list[$form->ID] = $form->post_title;
     }
+    return $list;
+}
 
-    $reg_id = esc_attr(cf7ws_get_option('reg_form_id', ''));
-    $wait_id = esc_attr(cf7ws_get_option('wait_form_id', ''));
-    $max = esc_attr(cf7ws_get_option('max_subs', 200));
-    $emails = esc_attr(cf7ws_get_option('alert_emails', get_bloginfo('admin_email')));
-    $count = get_cf7_submission_count_cfdb7((int)$reg_id);
+// === Settings page UI ===
+function cf7fs_settings_page() {
+    $forms = cf7fs_get_forms_list();
     ?>
-
     <div class="wrap">
-        <h1>CF7 Waitlist Switcher</h1>
-        <form method="post">
-            <?php wp_nonce_field('cf7ws_update_settings'); ?>
+        <h1>CF7 Forms Switcher Settings</h1>
+        <form method="post" action="options.php">
+            <?php settings_fields('cf7fs_settings'); ?>
             <table class="form-table">
                 <tr>
-                    <th scope="row"><label for="reg_form_id">Registration Form ID</label></th>
-                    <td><input name="reg_form_id" type="number" value="<?php echo $reg_id; ?>" class="regular-text" /></td>
+                    <th>Registration Form</th>
+                    <td>
+                        <select name="cf7fs_registration_form_id">
+                            <?php foreach ($forms as $id => $title): ?>
+                                <option value="<?php echo esc_attr($id); ?>" <?php selected(get_option('cf7fs_registration_form_id'), $id); ?>>
+                                    <?php echo esc_html($title); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="wait_form_id">Waitlist Form ID</label></th>
-                    <td><input name="wait_form_id" type="number" value="<?php echo $wait_id; ?>" class="regular-text" /></td>
+                    <th>Waitlist Form</th>
+                    <td>
+                        <select name="cf7fs_waitlist_form_id">
+                            <?php foreach ($forms as $id => $title): ?>
+                                <option value="<?php echo esc_attr($id); ?>" <?php selected(get_option('cf7fs_waitlist_form_id'), $id); ?>>
+                                    <?php echo esc_html($title); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="max_subs">Max Submissions</label></th>
-                    <td><input name="max_subs" type="number" value="<?php echo $max; ?>" class="regular-text" /></td>
+                    <th>Max Submissions</th>
+                    <td><input type="number" name="cf7fs_max_submissions" value="<?php echo esc_attr(get_option('cf7fs_max_submissions', 200)); ?>" /></td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="alert_emails">Alert Emails (comma separated)</label></th>
-                    <td><input name="alert_emails" type="text" value="<?php echo $emails; ?>" class="regular-text" /></td>
+                    <th>Alert Emails (comma-separated)</th>
+                    <td><input type="text" name="cf7fs_alert_emails" value="<?php echo esc_attr(get_option('cf7fs_alert_emails')); ?>" /></td>
                 </tr>
             </table>
             <?php submit_button(); ?>
         </form>
 
-        <h2>Submission Count</h2>
-        <p><strong>Current:</strong> <?php echo $count; ?> / <?php echo $max; ?></p>
-
-        <form method="get">
-            <input type="hidden" name="page" value="cf7-waitlist-switcher">
-            <input type="hidden" name="reset" value="1">
-            <input type="submit" class="button button-secondary" value="Reset Submission Count (Delete Entries)">
+        <form method="post">
+            <?php submit_button('Reset Registration Submissions', 'delete', 'cf7fs_reset_submissions'); ?>
         </form>
-
-        <?php if (isset($_GET['reset']) && $_GET['reset'] === '1') {
-            global $wpdb;
-            $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$wpdb->prefix}db7_forms WHERE form_post_id = %d",
-                $reg_id
-            ));
-            echo '<div class="updated"><p>Submission count has been reset (entries deleted from CFDB7).</p></div>';
-        } ?>
     </div>
     <?php
 }
+
+// === Handle reset button ===
+add_action('admin_init', function() {
+    if (isset($_POST['cf7fs_reset_submissions'])) {
+        global $wpdb;
+        $form_id = get_option('cf7fs_registration_form_id');
+        $table = $wpdb->prefix . 'db7_forms';
+        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE form_post_id = %d", $form_id));
+        add_action('admin_notices', function () {
+            echo '<div class="notice notice-success"><p>CFDB7 entries for the registration form have been reset.</p></div>';
+        });
+    }
+});
+
+// === CFDB7 submission count ===
+function cf7fs_get_submission_count($form_id) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'db7_forms';
+    return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $table WHERE form_post_id = %d", $form_id));
+}
+
+// === Conditional shortcode ===
+add_shortcode('conditional_form', function() {
+    $reg_id = get_option('cf7fs_registration_form_id');
+    $wait_id = get_option('cf7fs_waitlist_form_id');
+    $max = intval(get_option('cf7fs_max_submissions', 200));
+    $emails = get_option('cf7fs_alert_emails');
+
+    $count = cf7fs_get_submission_count($reg_id);
+
+    if ($count >= $max) {
+        // Send alert email once
+        $already_sent = get_option('cf7fs_alert_sent', false);
+        if (!$already_sent && $emails) {
+            $to = array_map('trim', explode(',', $emails));
+            wp_mail($to, 'CF7 Submission Limit Reached', "The maximum number of submissions ($max) has been reached for the registration form.");
+            update_option('cf7fs_alert_sent', true);
+        }
+        return do_shortcode('[contact-form-7 id="' . esc_attr($wait_id) . '"]');
+    } else {
+        update_option('cf7fs_alert_sent', false); // reset flag if under limit
+        return do_shortcode('[contact-form-7 id="' . esc_attr($reg_id) . '"]');
+    }
+});
